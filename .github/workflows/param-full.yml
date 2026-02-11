@@ -33,15 +33,15 @@ jobs:
 
       - name: Validate input file
         run: |
-          if [ ! -f input_urls.txt ]; then
-            echo "❌ ملف input_urls.txt غير موجود!"
+          if [ ! -f urls.txt ]; then
+            echo "❌ ملف urls.txt غير موجود!"
             exit 1
           fi
 
       - name: Run Arjun (Parameter Discovery)
         run: |
           echo "🔍 Running Arjun..."
-          arjun -i input_urls.txt -o arjun_output.json --stable
+          arjun -i urls.txt -o arjun_output.json --stable
 
       - name: Extract URLs With Params
         run: |
@@ -71,9 +71,14 @@ jobs:
         run: |
           echo "⚡ Running FFUF for param fuzzing..."
           mkdir ffuf_output
+          if [ ! -f combined_words.txt ]; then
+            echo "❌ ملف combined_words.txt غير موجود!"
+            exit 1
+          fi
+
           while read url; do
             ffuf -u "$url&FUZZ=test" \
-                 -w fuzz_wordlist.txt \
+                 -w combined_words.txt \
                  -mc 200,302,403 \
                  -t 50 \
                  -o "ffuf_output/$(echo $url | sed 's/[^a-zA-Z0-9]/_/g').json"
