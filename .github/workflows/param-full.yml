@@ -33,7 +33,7 @@ jobs:
 
       - name: Validate input file
         run: |
-          if [ ! -f urls.txt ]; then
+          if [ ! -f output.txt ]; then
             echo "❌ ملف urls.txt غير موجود!"
             exit 1
           fi
