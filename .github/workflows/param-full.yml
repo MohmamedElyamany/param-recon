@@ -1,99 +1,116 @@
-name: Full Parameter Recon (Arjun + Nuclei + Dalfox + FFUF)
+name: Arjun High-Speed Pentest (10k URLs)
 
 on:
-  workflow_dispatch:   # تشغيل يدوي فقط
+  workflow_dispatch: # تقدر تشغله يدوي من GitHub
+  # push:
+  #   branches: [ "main" ] # لو عايزه يشتغل لوحده
+
+permissions:
+  contents: write # لازم عشان نرفع الـ Artifacts ونعمل إنشاء للملوفات المؤقتة
 
 jobs:
-  recon:
+  # ==========================================
+  # JOB 1: تقسيم الملف وتجهيز المصفوفة (Matrix)
+  # ==========================================
+  prepare-chunks:
+    name: Split URLs & Prepare Matrix
     runs-on: ubuntu-latest
-
+    outputs:
+      # هنرجع أسماء الملفات المتقسمة لاستخدامها في الخطوة الجاية
+      chunk_files: ${{ steps.split-script.outputs.matrix }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Install Tools
+      - name: Split URL file into chunks
+        id: split-script
         run: |
-          sudo apt update
-          sudo apt install -y python3 python3-pip git curl jq golang
-
-          # Arjun
-          pip install arjun
-
-          # ProjectDiscovery tools
-          go install -v github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest
-
-          # Dalfox
-          go install -v github.com/hahwul/dalfox/v2@latest
-
-          # FFUF
-          go install github.com/ffuf/ffuf/v2@latest
-
-      - name: Add Go Path
-        run: echo "$HOME/go/bin" >> $GITHUB_PATH
-
-      - name: Validate input file
-        run: |
-          if [ ! -f output.txt ]; then
-            echo "❌ ملف urls.txt غير موجود!"
+          # افترض إن اسم ملف الـ URLs عندك هو 'targets.txt'
+          # لو اسمه تاني، غيره هنا تحت
+          INPUT_FILE="targets.txt"
+          
+          if [ ! -f "$INPUT_FILE" ]; then
+            echo "❌ الملف $INPUT_FILE مش موجود!"
             exit 1
           fi
 
-      - name: Run Arjun (Parameter Discovery)
+          # تقسيم الملف لـ 10 أجزاء (كل جزء 1,000 سطر تقريباً)
+          # لو عايز تزيد السرعة أكتر، غيّر الـ 10 لـ 20 (يحتاج رنرات أكتر أو خطة مدفوعة)
+          split -l 1000 -d --additional-suffix=.txt "$INPUT_FILE" chunk_
+          
+          # تجهيز قائمة بأسماء الملفات لتمريرها للماتريكس
+          # بتيجي النتيجة بالصيغة دي: ["chunk_00.txt","chunk_01.txt",...]
+          FILES=$(ls chunk_*.txt | jq -R -s -c 'split("\n")[:-1]')
+          echo "matrix=$FILES" >> $GITHUB_OUTPUT
+          
+          echo "✅ تم تقسيم الملف لـ $(ls chunk_*.txt | wc -l) أجزاء."
+
+  # ==========================================
+  # JOB 2: تشغيل Arjun بالتوازي (Matrix)
+  # ==========================================
+  arjun-scan:
+    name: Scan Chunk ${{ matrix.chunk }}
+    needs: prepare-chunks # متبقاش تشغل غير لما التقسيم يخلص
+    runs-on: ubuntu-latest
+    # المصفوفة اللي بتاخد أسماء الملفات من الخطوة اللي فاتت
+    strategy:
+      fail-fast: false # لو جزء فشل، خلي الباقي يكمل
+      matrix:
+        chunk: ${{ fromJson(needs.prepare-chunks.outputs.chunk_files) }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Arjun
+        run: pip install arjun
+
+      - name: Run Arjun (Max Speed Mode)
         run: |
-          echo "🔍 Running Arjun..."
-          arjun -i urls.txt -o arjun_output.json --stable
+          echo "🚀 جاري تشغيل Arjun على الملف: ${{ matrix.chunk }}"
+          
+          # إعدادات السرعة القصوى:
+          # -t 30 : عدد الـ Threads (خليه عالي، 30 أو 50 حسب قوة السيرفر)
+          # -w small : Wordlist صغير (أسرع بكتير، لكن أقل دقة). استخدم medium لو متاح وقت.
+          # --disable-redirects : ماتبعتش على redirect (توفير وقت).
+          # -T 5 : Timeout قصير (لو السيرفر استجاب بعد 5 ثواني، يسيبه).
+          
+          arjun -i "${{ matrix.chunk }}" -oJ "result_${{ matrix.chunk }}.json" -t 30 -w small --disable-redirects -T 5
 
-      - name: Extract URLs With Params
+      - name: Upload Result for this Chunk
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.chunk }}
+          path: result_${{ matrix.chunk }}.json
+          retention-days: 7
+
+  # ==========================================
+  # JOB 3: دمج النتائج (اختياري)
+  # ==========================================
+  merge-results:
+    name: Merge All Results
+    needs: arjun-scan
+    runs-on: ubuntu-latest
+    if: always() # اشغل ده حتى لو فشل بعض الـ chunks
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-results
+
+      - name: Merge JSON files
         run: |
-          echo "🔧 Extracting URLs with parameters..."
-          jq -r 'to_entries[] | .key' arjun_output.json > arjun_urls.txt
-
-      - name: Download Nuclei Templates
-        run: nuclei --update-templates
-
-      - name: Run Nuclei Parameter Templates
-        run: |
-          echo "💥 Running Nuclei parameter tests..."
-          nuclei -l arjun_urls.txt \
-                 -t ~/nuclei-templates/http/vulnerabilities/parameter/ \
-                 -t ~/nuclei-templates/http/exposures/parameters/ \
-                 -severity low,medium,high,critical \
-                 -o nuclei_param_results.txt
-
-      - name: Run Dalfox XSS Scan
-        run: |
-          echo "🧪 Running Dalfox XSS testing..."
-          while read url; do
-            dalfox url "$url" >> dalfox_results.txt
-          done < arjun_urls.txt
-
-      - name: Run FFUF Parameter Fuzzing
-        run: |
-          echo "⚡ Running FFUF for param fuzzing..."
-          mkdir ffuf_output
-          if [ ! -f combined_words.txt ]; then
-            echo "❌ ملف combined_words.txt غير موجود!"
-            exit 1
-          fi
-
-          while read url; do
-            ffuf -u "$url&FUZZ=test" \
-                 -w combined_words.txt \
-                 -mc 200,302,403 \
-                 -t 50 \
-                 -o "ffuf_output/$(echo $url | sed 's/[^a-zA-Z0-9]/_/g').json"
-          done < arjun_urls.txt
-
-      - name: Commit Results
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-
-          git add arjun_output.json || true
-          git add arjun_urls.txt || true
-          git add nuclei_param_results.txt || true
-          git add dalfox_results.txt || true
-          git add ffuf_output || true
-
-          git commit -m "Full Param Scan (Arjun + Nuclei + Dalfox + FFUF)" || true
-          git push || true
+          # دمج كل ملفات JSON في ملف واحد كبير
+          # دي خطوة برمجية بسيطة باستخدام jq
+          jq -s 'add' all-results/result-*/result_*.json > final_all_results.json 2>/dev/null || echo "حدث خطأ في الدمج، الملفات متاحة ك artifacts منفصلة."
+          
+      - name: Upload Final Merged Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-merged-report
+          path: final_all_results.json
